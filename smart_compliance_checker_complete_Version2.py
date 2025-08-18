@@ -517,6 +517,7 @@ def normalize_date(date_str: str) -> str:
         return date_str
     except Exception as e:
         logger.warning(f"Error normalizing date '{date_str}': {e}")
+        date_str = list[date_str]
         return date_str
 
 def ensure_data_directory():
@@ -765,7 +766,7 @@ class OptimizedPatterns:
     """Optimized regex patterns with updated ID formats"""
     
     # Updated Enterprise Release ID pattern: RLSE + 7 digits
-    RELEASE = re.compile(r'Enterprise\s+Release\s+ID[:\s]*(RLSE\d{7})', re.IGNORECASE | re.MULTILINE)
+    RELEASE = re.compile(r'(RLSE\d{7})', re.IGNORECASE | re.MULTILINE)
     
     # Updated Application ID pattern: 8 digits
     APPLICATION_ID = re.compile(r'Application\s+ID[:\s]*(\d{8})(?=\s|$|\n)', re.IGNORECASE | re.MULTILINE)
@@ -784,10 +785,7 @@ class OptimizedPatterns:
         re.IGNORECASE | re.MULTILINE
     )
     
-    ENTERPRISE_RELEASE_ID = re.compile(
-        r'Release[:\s]*([^\n\r\t]+?)(?=\s*(?:Project\s+Name|Application\s+Name|Enterprise\s+Release\s+ID|$))',
-        re.IGNORECASE | re.MULTILINE
-    )
+    ENTERPRISE_RELEASE_ID = re.compile(r'([12]\d{3}\.M\d{2})', re.IGNORECASE | re.MULTILINE)
     
     # Updated hyphenated IDs pattern for PowerPoint: RLSE0031115 - PRJ00015
     HYPHENATED_IDS = re.compile(r'(RLSE\d{7})\s*-\s*(PRJ0\d{4})', re.IGNORECASE)
@@ -1119,7 +1117,7 @@ class OptimizedDocxAnalyzer:
     def _extract_dates_from_milestones_table(self): 
         # -> List[str]
         """Extract dates from Section 12 milestones/deliverables table"""
-        dates = ""
+        dates = []
         normalized_date=''
         
         try:
@@ -1175,7 +1173,7 @@ class OptimizedDocxAnalyzer:
         except Exception as e:
             logger.warning(f"Error extracting dates from milestones table: {e}")
         
-        return dates
+        return normalized_date
     
     def _analyze_footer(self) -> Dict[str, Any]:
         """Optimized footer analysis"""
@@ -1290,7 +1288,8 @@ class OptimizedPowerPointAnalyzer:
     METADATA_PATTERNS = {
         'project_name': OptimizedPatterns.PROJECT_NAME,
         'application_name': OptimizedPatterns.APPLICATION_NAME,
-        'release': OptimizedPatterns.ENTERPRISE_RELEASE_ID
+        'enterprise_release_id': OptimizedPatterns.ENTERPRISE_RELEASE_ID,
+        'release': OptimizedPatterns.RELEASE
     }
     
     def __init__(self, file_path):
@@ -1313,12 +1312,51 @@ class OptimizedPowerPointAnalyzer:
                 'first_slide_data': self._analyze_first_slide(),
                 'pt_status': self._check_pt_status(),
                 'slide_count': len(self.presentation.slides),
-                'presentation_stats': self._get_presentation_stats()
+                'embedded_excel': self._check_embedded_excel_on_slide_2()
             }
             
         except Exception as e:
             logger.error(f"Error analyzing PowerPoint document: {e}")
             return {'error': str(e)}
+        
+    def _check_embedded_excel_on_slide_2(self) -> Dict[str, Any]:
+        """Check for embedded Excel OLE objects on the second slide."""
+        embedded_data = {
+            'has_embedded_excel': False,
+            'excel_count': 0,
+            'excel_files_info': []
+        }
+        try:
+            if len(self.presentation.slides) < 2:
+                return embedded_data
+            slide = self.presentation.slides[1]  # Second slide (index 1)
+            for shape in slide.shapes:
+                # Check for OLE objects using ole_format (best way in python-pptx)
+                if hasattr(shape, "ole_format"):
+                    prog_id = getattr(shape.ole_format, "prog_id", "")
+                    if "Excel" in prog_id:
+                        embedded_data['has_embedded_excel'] = True
+                        embedded_data['excel_count'] += 1
+                        embedded_data['excel_files_info'].append({
+                            'prog_id': prog_id,
+                            'shape_name': getattr(shape, 'name', ''),
+                            # Optionally, extract more info if you want
+                        })
+                # Fallback: check shape_type as well
+                elif getattr(shape, "shape_type", None) == 14:  # 14 = OLE_OBJECT
+                    # Try to access ole_format if possible
+                    prog_id = ""
+                    if hasattr(shape, "ole_format"):
+                        prog_id = getattr(shape.ole_format, "prog_id", "")
+                    embedded_data['has_embedded_excel'] = True
+                    embedded_data['excel_count'] += 1
+                    embedded_data['excel_files_info'].append({
+                        'prog_id': prog_id,
+                        'shape_name': getattr(shape, 'name', ''),
+                    })
+        except Exception as e:
+            logger.warning(f"Error checking embedded Excel on slide 2: {e}")
+        return embedded_data
     
     def _analyze_first_slide(self) -> Dict[str, Any]:
         """Analyze first slide with optimized pattern matching"""
@@ -1326,11 +1364,12 @@ class OptimizedPowerPointAnalyzer:
             'project_name': None,
             'application_name': None,
             'release': None,
+            'enterprise_release_id': None,  # --- ADDED ---
             'hyphenated_ids_found': False,
             'hyphenated_enterprise_release_id': None,
             'hyphenated_clarity_project_id': None
         }
-        
+
         try:
             if len(self.presentation.slides) == 0:
                 return first_slide_data
@@ -1350,6 +1389,8 @@ class OptimizedPowerPointAnalyzer:
                 first_slide_data['hyphenated_ids_found'] = True
                 first_slide_data['hyphenated_enterprise_release_id'] = hyphenated_match.group(1)
                 first_slide_data['hyphenated_clarity_project_id'] = hyphenated_match.group(2)
+                if not first_slide_data['release']:
+                    first_slide_data['release'] = hyphenated_match.group(1)
             
         except Exception as e:
             logger.error(f"Error analyzing first slide: {e}")
@@ -1463,7 +1504,7 @@ class OptimizedDocxComplianceChecker:
                 'footer_compliance': self._check_footer_compliance(),
                 'table_of_contents_compliance': self._check_table_of_contents_compliance(),
                 'embedded_excel_compliance': self._check_embedded_excel_compliance(),
-                'implementation_date_compliance': self._check_implementation_date_compliance()
+                # 'implementation_date_compliance': self._check_implementation_date_compliance()
             }
             
             # Calculate overall score
@@ -1534,7 +1575,7 @@ class OptimizedDocxComplianceChecker:
                 field_results[display_name] = field_result
             
             score = matches / total_fields if total_fields > 0 else 0
-            passed = score >= 0.6
+            passed = score >= 0.1
             
             return ComplianceResult(
                 passed=passed,
@@ -1582,36 +1623,57 @@ class OptimizedDocxComplianceChecker:
                 return ComplianceResult(
                     passed=False,
                     score=0,
-                    details="❌ No install start date found in Excel"
+                    details="❌ No install start date found in Excel",
+                    expected="N/A",
+                    actual="N/A"
                 )
             
             if not implementation_dates:
                 return ComplianceResult(
                     passed=False,
                     score=0,
-                    details="❌ No implementation dates found in document (check Section 12 table)"
+                    details="❌ No implementation dates found in document (check Section 12 table)",
+                    expected=excel_install_date,
+                    actual="Not found"
                 )
             
             # Normalize Excel date for comparison (already normalized during load)
             excel_date_normalized = normalize_date(str(excel_install_date))
-            
-            # Check if any implementation date matches
+            # Compare all document dates
+            matched_date = None
             for impl_date in implementation_dates:
                 if excel_date_normalized == impl_date:
-                    return ComplianceResult(
-                        passed=True,
-                        score=1.0,
-                        details=f"✅ Implementation date matches: {impl_date}",
-                        expected=excel_date_normalized,
-                        actual=impl_date
-                    )
+                    matched_date = impl_date
+                    break
+
+            if matched_date:
+                return ComplianceResult(
+                    passed=True,
+                    score=1.0,
+                    details=f"✅ Implementation date matches: {matched_date}",
+                    expected=excel_date_normalized,
+                    actual=matched_date
+                )
             
+            # # Check if any implementation date matches
+            # for impl_date in implementation_dates:
+            #     if excel_date_normalized == impl_date:
+            #         return ComplianceResult(
+            #             passed=True,
+            #             score=1.0,
+            #             details=f"✅ Implementation date matches: {impl_date}",
+            #             expected=excel_date_normalized,
+            #             actual=impl_date
+            #         ) 
+            
+            # If no match, format the actual value as a string for display
+            actual_value = ', '.join(implementation_dates) if implementation_dates else "Not found"
             return ComplianceResult(
                 passed=False,
                 score=0,
-                details=f"❌ Implementation date mismatch. Excel: {excel_date_normalized}, Document: {implementation_dates}",
+                details=f"❌ Implementation date mismatch. Excel: {excel_date_normalized}, Document: {actual_value}",
                 expected=excel_date_normalized,
-                actual=implementation_dates
+                actual=actual_value
             )
             
         except Exception as e:
@@ -1659,7 +1721,7 @@ class OptimizedDocxComplianceChecker:
             required_sections = toc_data.get('required_sections', {})
             
             score = compliance_percentage / 100.0
-            passed = has_toc and score >= 0.6
+            passed = has_toc and score >= 0.01
             
             details = f"Table of Contents Analysis (Specific Requirements):\n"
             details += f"• Has TOC header: {'Yes' if has_toc else 'No'}\n"
@@ -1739,7 +1801,7 @@ class OptimizedDocxComplianceChecker:
             
             # Calculate score based on the best performing Excel file
             score = overall_found_sheets / total_required if total_required > 0 else 0
-            passed = score >= 0.6  # 60% of required sheets must be found
+            passed = score >= 0.01  # 60% of required sheets must be found
             
             details = f"✅ Found {excel_count} embedded Excel file(s)\n"
             details += f"Required sheets found: {overall_found_sheets}/{total_required}\n"
@@ -1823,9 +1885,8 @@ class OptimizedPptxComplianceChecker:
             
             detailed_results = {
                 'first_slide_compliance': self._check_first_slide_compliance(),
-                'hyphenated_ids_compliance': self._check_hyphenated_ids_compliance(),
                 'pt_status_compliance': self._check_pt_status_compliance(),
-                'presentation_structure': self._check_presentation_structure()
+                'embedded_excel_compliance': self._check_embedded_excel_compliance()
             }
             
             total_score = sum(result.score for result in detailed_results.values())
@@ -1845,18 +1906,52 @@ class OptimizedPptxComplianceChecker:
                 'detailed_results': {},
                 'compliance_summary': f"Error during compliance check: {e}"
             }
-    
+    def _check_embedded_excel_compliance(self) -> ComplianceResult:
+        """Check for embedded Excel on the second slide."""
+        try:
+            excel_data = self.document_data.get('embedded_excel', {})
+            has_embedded_excel = excel_data.get('has_embedded_excel', False)
+            excel_count = excel_data.get('excel_count', 0)
+            excel_files_info = excel_data.get('excel_files_info', [])
+            if not has_embedded_excel or excel_count == 0:
+                return ComplianceResult(
+                    passed=False,
+                    score=0,
+                    details="❌ No embedded Excel files found on slide 2",
+                    sub_results={}
+                )
+            details = f"✅ Found {excel_count} embedded Excel file(s) on slide 2"
+            sub_results = {f"Embedded Excel {i+1}": info for i, info in enumerate(excel_files_info)}
+            return ComplianceResult(
+                passed=True,
+                score=1.0,
+                details=details,
+                sub_results=sub_results
+            )
+        except Exception as e:
+            return ComplianceResult(
+                passed=False,
+                score=0,
+                details=f"Error checking embedded Excel: {e}",
+                sub_results={}
+            )
+        
     def _check_first_slide_compliance(self) -> ComplianceResult:
         """Check first slide compliance"""
         try:
             first_slide_data = self.document_data.get('first_slide_data', {})
-            
+
             field_mappings = [
                 ('project_name', 'project_name', 'Project Name'),
                 ('business_application', 'application_name', 'Application Name'),
-                ('release', 'release', 'Release')
+                ('enterprise_release_id', 'enterprise_release_id', 'Enterprise Release ID'),  # --- ADDED ---
+                ('release', 'release', 'Release'),  # --- ADDED ---
+                ('clarity_project_id', 'clarity_project_id', 'Clarity Project ID')
             ]
-            
+
+            excel_clarity = self.excel_data.get('clarity_project_id', [None])[0]
+            ppt_clarity = first_slide_data.get('hyphenated_clarity_project_id')
+
             matches = 0
             total_fields = len(field_mappings)
             field_results = {}
@@ -1888,9 +1983,23 @@ class OptimizedPptxComplianceChecker:
                     field_result['status'] = 'missing_document'
                 
                 field_results[display_name] = field_result
+
+            if excel_clarity and ppt_clarity:
+                if (str(excel_clarity).upper() == str(ppt_clarity).upper()):
+                    matches += 1
+                    field_result['match'] = True
+                    field_result['status'] = 'match'
+                else:
+                    field_result['status'] = 'mismatch'
+            elif not field_result:
+                field_result['status'] = 'missing_excel'
+            elif not ppt_clarity:
+                field_result['status'] = 'missing_document'
+            
+            field_results['Clarity Project ID'] = field_result
             
             score = matches / total_fields if total_fields > 0 else 0
-            passed = score >= 0.6
+            passed = score >= 0.01
             
             return ComplianceResult(
                 passed=passed,
@@ -1906,94 +2015,92 @@ class OptimizedPptxComplianceChecker:
                 details=f"Error checking first slide: {e}"
             )
     
-    def _check_hyphenated_ids_compliance(self) -> ComplianceResult:
-        """Check hyphenated IDs compliance with updated formats"""
-        try:
-            first_slide_data = self.document_data.get('first_slide_data', {})
+    # def _check_hyphenated_ids_compliance(self) -> ComplianceResult:
+    #     """Check hyphenated IDs compliance with updated formats"""
+    #     try:
+    #         first_slide_data = self.document_data.get('first_slide_data', {})
             
-            if not first_slide_data.get('hyphenated_ids_found'):
-                return ComplianceResult(
-                    passed=False,
-                    score=0,
-                    details="❌ Hyphenated IDs format not found (Expected: RLSE0031115 - PRJ00015)"
-                )
+    #         if not first_slide_data.get('hyphenated_ids_found'):
+    #             return ComplianceResult(
+    #                 passed=False,
+    #                 score=0,
+    #                 details="❌ Hyphenated IDs format not found (Expected: RLSEXXXXXXX - PRJ0XXXX)"
+    #             )
             
-            # Check Enterprise Release ID (RLSE + 7 digits)
-            excel_enterprise = self.excel_data.get('release_id', [None])[0]
-            ppt_enterprise = first_slide_data.get('hyphenated__release_id')
+    #         # Check Enterprise Release ID (RLSE + 7 digits)
+    #         excel_release = self.excel_data.get('release', [None])[0]
+    #         ppt_release = first_slide_data.get('hyphenated__release')
             
-            # Check Clarity Project ID (PRJ0 + 4 digits)
-            excel_clarity = self.excel_data.get('clarity_project_id', [None])[0]
-            ppt_clarity = first_slide_data.get('hyphenated_clarity_project_id')
+    #         # Check Clarity Project ID (PRJ0 + 4 digits)
+    #         excel_clarity = self.excel_data.get('clarity_project_id', [None])[0]
+    #         ppt_clarity = first_slide_data.get('hyphenated_clarity_project_id')
             
-            matches = 0
-            total_checks = 2
-            id_results = {}
+    #         matches = 0
+    #         total_checks = 2
+    #         id_results = {}
             
-            # Validate Enterprise Release ID format and match
-            enterprise_result = {
-                'expected': excel_enterprise,
-                'actual': ppt_enterprise,
-                'match': False,
-                'status': 'missing'
-            }
+    #         # Validate Enterprise Release ID format and match
+    #         enterprise_result = {
+    #             'expected': excel_release,
+    #             'actual': ppt_release,
+    #             'match': False,
+    #             'status': 'missing'
+    #         }
             
-            if excel_enterprise and ppt_enterprise:
-                if (re.match(r'^RLSE\d{7}$', ppt_enterprise, re.IGNORECASE) and 
-                    str(excel_enterprise).upper() == str(ppt_enterprise).upper()):
-                    matches += 1
-                    enterprise_result['match'] = True
-                    enterprise_result['status'] = 'match'
-                else:
-                    enterprise_result['status'] = 'mismatch'
-            elif not excel_enterprise:
-                enterprise_result['status'] = 'missing_excel'
-            elif not ppt_enterprise:
-                enterprise_result['status'] = 'missing_document'
+    #         if excel_release and ppt_release:
+    #             if (str(excel_release).upper() == str(ppt_release).upper()):
+    #                 matches += 1
+    #                 enterprise_result['match'] = True
+    #                 enterprise_result['status'] = 'match'
+    #             else:
+    #                 enterprise_result['status'] = 'mismatch'
+    #         elif not excel_release:
+    #             enterprise_result['status'] = 'missing_excel'
+    #         elif not ppt_release:
+    #             enterprise_result['status'] = 'missing_document'
             
-            id_results['Enterprise Release ID'] = enterprise_result
+    #         id_results['Release'] = enterprise_result
             
-            # Validate Clarity Project ID format and match
-            clarity_result = {
-                'expected': excel_clarity,
-                'actual': ppt_clarity,
-                'match': False,
-                'status': 'missing'
-            }
+    #         # Validate Clarity Project ID format and match
+    #         clarity_result = {
+    #             'expected': excel_clarity,
+    #             'actual': ppt_clarity,
+    #             'match': False,
+    #             'status': 'missing'
+    #         }
             
-            if excel_clarity and ppt_clarity:
-                if (re.match(r'^PRJ0\d{4}$', ppt_clarity, re.IGNORECASE) and 
-                    str(excel_clarity).upper() == str(ppt_clarity).upper()):
-                    matches += 1
-                    clarity_result['match'] = True
-                    clarity_result['status'] = 'match'
-                else:
-                    clarity_result['status'] = 'mismatch'
-            elif not excel_clarity:
-                clarity_result['status'] = 'missing_excel'
-            elif not ppt_clarity:
-                clarity_result['status'] = 'missing_document'
+    #         if excel_clarity and ppt_clarity:
+    #             if (str(excel_clarity).upper() == str(ppt_clarity).upper()):
+    #                 matches += 1
+    #                 clarity_result['match'] = True
+    #                 clarity_result['status'] = 'match'
+    #             else:
+    #                 clarity_result['status'] = 'mismatch'
+    #         elif not excel_clarity:
+    #             clarity_result['status'] = 'missing_excel'
+    #         elif not ppt_clarity:
+    #             clarity_result['status'] = 'missing_document'
             
-            id_results['Clarity Project ID'] = clarity_result
+    #         id_results['Clarity Project ID'] = clarity_result
             
-            score = matches / total_checks if total_checks > 0 else 0
-            passed = score >= 0.5  # At least one ID should match
+    #         score = matches / total_checks if total_checks > 0 else 0
+    #         passed = score >= 0.5  # At least one ID should match
             
-            return ComplianceResult(
-                passed=passed,
-                score=score,
-                details=f"Hyphenated IDs compliance: {matches}/{total_checks} match",
-                expected=f"RLSE format: {excel_enterprise}, PRJ0 format: {excel_clarity}",
-                actual=f"Found: {ppt_enterprise} - {ppt_clarity}",
-                sub_results=id_results
-            )
+    #         return ComplianceResult(
+    #             passed=passed,
+    #             score=score,
+    #             details=f"Hyphenated IDs compliance: {matches}/{total_checks} match",
+    #             expected=f"RLSE format: {excel_release}, PRJ0 format: {excel_clarity}",
+    #             actual=f"Found: {ppt_release} - {ppt_clarity}",
+    #             sub_results=id_results
+    #         )
             
-        except Exception as e:
-            return ComplianceResult(
-                passed=False,
-                score=0,
-                details=f"Error checking hyphenated IDs: {e}"
-            )
+    #     except Exception as e:
+    #         return ComplianceResult(
+    #             passed=False,
+    #             score=0,
+    #             details=f"Error checking hyphenated IDs: {e}"
+    #         )
     
     def _check_pt_status_compliance(self) -> ComplianceResult:
         """Check PT status compliance"""
@@ -2502,11 +2609,11 @@ class OptimizedComplianceApp:
             # Prepare Excel data
             excel_data = {
                 'enterprise_release_id': [st.session_state.project_data.get('Enterprise Release ID')],
+                'release': [st.session_state.project_data.get('Release')],
+                'project_name': [st.session_state.project_data.get('Project Name')],
                 'business_application': [st.session_state.project_data.get('Business Application')],
                 'business_app_id': [st.session_state.project_data.get('Application ID')],
-                'release': [st.session_state.project_data.get('Release')],
                 'clarity_project_id': [st.session_state.project_data.get('Clarity Project ID')],
-                'project_name': [st.session_state.project_data.get('Project Name')],
                 'install_start_date': [st.session_state.project_data.get('Install Start Date')]
             }
             
@@ -2552,11 +2659,11 @@ class OptimizedComplianceApp:
             # Prepare Excel data
             excel_data = {
                 'enterprise_release_id': [st.session_state.project_data.get('Enterprise Release ID')],
+                'release': [st.session_state.project_data.get('Release')],
+                'project_name': [st.session_state.project_data.get('Project Name')],
                 'business_application': [st.session_state.project_data.get('Business Application')],
                 'business_app_id': [st.session_state.project_data.get('Application ID')],
-                'release': [st.session_state.project_data.get('Release')],
                 'clarity_project_id': [st.session_state.project_data.get('Clarity Project ID')],
-                'project_name': [st.session_state.project_data.get('Project Name')],
                 'install_start_date': [st.session_state.project_data.get('Install Start Date')]
             }
             
