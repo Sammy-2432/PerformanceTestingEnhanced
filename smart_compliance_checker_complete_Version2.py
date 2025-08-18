@@ -61,11 +61,11 @@ logger = logging.getLogger(__name__)
 
 class AppConfig:
     """Application configuration with robust file detection"""
-    title = "Smart Test Plan Compliance Checker"
+    title = "Smart Compliance Checker"
     version = "2.5"
     icon = "📋"
-    user_login = "2338394_cgcp"
-    current_date = "2025-08-11 14:40:31"
+    user_login = ""
+    current_date = datetime.now()
     
     # Logo configuration
     logo_path = "logo.png"  # Place your logo file in the same directory as this script
@@ -91,10 +91,10 @@ class AppConfig:
     
     # Excel column mappings
     excel_column_mappings = {
-        'enterprise_release_id': 'B',  # Column B - Format: RLSE0031115
+        'enterprise_release_id': 'B',  # Column B 
         'business_application': 'C',    # Column C  
         'application_id': 'D',          # Column D - Format: 8 digits
-        'release': 'E',                 # Column E
+        'release': 'E',                 # Column E - Format: RLSE0031115
         'clarity_project_id': 'I',      # Column I - Format: PRJ00015
         'project_name': 'J',            # Column J
         'install_start_date': 'R'       # Column R - Format: 08/11/2025
@@ -556,7 +556,7 @@ def create_sample_excel_file():
         df = pd.DataFrame(data)
         
         with pd.ExcelWriter(excel_file_path, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Sheet1', index=False)
+            df.to_excel(writer, sheet_name='Page 1', index=False)
         
         logger.info("Sample Excel file created with updated ID formats")
         return excel_file_path
@@ -589,7 +589,7 @@ class OptimizedExcelReader:
             sample_path = create_sample_excel_file()
             return cls(sample_path)
         
-    def load_data(self, sheet_name: str = 'Sheet1', optimize_memory: bool = True) -> bool:
+    def load_data(self, sheet_name: str = 'Page 1', optimize_memory: bool = True) -> bool:
         """Load Excel data with error handling and optimization"""
         try:
             if not self.file_path or not self.file_path.exists():
@@ -654,12 +654,12 @@ class OptimizedExcelReader:
     @lru_cache(maxsize=256)
     def get_releases(self) -> List[str]:
         """Get unique releases using vectorized operations"""
-        if self.df is None or 'Release' not in self.df.columns:
+        if self.df is None or 'Enterprise Release ID' not in self.df.columns:
             return []
             
         try:
             # Vectorized operation for better performance
-            releases = self.df['Release'].dropna().unique()
+            releases = self.df['Enterprise Release ID'].dropna().unique()
             return sorted([str(r) for r in releases])
         except Exception as e:
             logger.error(f"Error getting releases: {e}")
@@ -673,7 +673,7 @@ class OptimizedExcelReader:
             
         try:
             # Vectorized boolean indexing
-            mask = self.df['Release'] == release
+            mask = self.df['Enterprise Release ID'] == release
             filtered_df = self.df[mask]
             
             if 'Project Name' in filtered_df.columns:
@@ -692,7 +692,7 @@ class OptimizedExcelReader:
             
         try:
             # Compound boolean mask for better performance
-            mask = (self.df['Release'] == release) & (self.df['Project Name'] == project)
+            mask = (self.df['Enterprise Release ID'] == release) & (self.df['Project Name'] == project)
             filtered_df = self.df[mask]
             
             if 'Business Application' in filtered_df.columns:
@@ -711,7 +711,7 @@ class OptimizedExcelReader:
         try:
             # Triple compound boolean mask
             mask = (
-                (self.df['Release'] == release) & 
+                (self.df['Enterprise Release ID'].astype(str).str.strip() == str(release).strip()) & 
                 (self.df['Project Name'] == project) &
                 (self.df['Business Application'] == business_app)
             )
@@ -765,7 +765,7 @@ class OptimizedPatterns:
     """Optimized regex patterns with updated ID formats"""
     
     # Updated Enterprise Release ID pattern: RLSE + 7 digits
-    ENTERPRISE_RELEASE_ID = re.compile(r'Enterprise\s+Release\s+ID[:\s]*(RLSE\d{7})', re.IGNORECASE | re.MULTILINE)
+    RELEASE = re.compile(r'Enterprise\s+Release\s+ID[:\s]*(RLSE\d{7})', re.IGNORECASE | re.MULTILINE)
     
     # Updated Application ID pattern: 8 digits
     APPLICATION_ID = re.compile(r'Application\s+ID[:\s]*(\d{8})(?=\s|$|\n)', re.IGNORECASE | re.MULTILINE)
@@ -784,7 +784,7 @@ class OptimizedPatterns:
         re.IGNORECASE | re.MULTILINE
     )
     
-    RELEASE = re.compile(
+    ENTERPRISE_RELEASE_ID = re.compile(
         r'Release[:\s]*([^\n\r\t]+?)(?=\s*(?:Project\s+Name|Application\s+Name|Enterprise\s+Release\s+ID|$))',
         re.IGNORECASE | re.MULTILINE
     )
@@ -1110,15 +1110,17 @@ class OptimizedDocxAnalyzer:
                     unique_dates.append(date)
             
             logger.info(f"Found implementation dates: {unique_dates}")
-            return unique_dates
+            return str(unique_dates)
             
         except Exception as e:
             logger.warning(f"Error extracting implementation dates: {e}")
             return dates
     
-    def _extract_dates_from_milestones_table(self) -> List[str]:
+    def _extract_dates_from_milestones_table(self): 
+        # -> List[str]
         """Extract dates from Section 12 milestones/deliverables table"""
-        dates = []
+        dates = ""
+        normalized_date=''
         
         try:
             # Look for tables in the document
@@ -1165,6 +1167,8 @@ class OptimizedDocxAnalyzer:
                                 for date_match in date_matches:
                                     normalized_date = normalize_date(date_match)
                                     if normalized_date:
+                                        if isinstance(normalized_date,list):
+                                            normalized_date = normalized_date[0]
                                         dates.append(normalized_date)
                                         logger.info(f"Found milestone date in table: {normalized_date}")
         
@@ -1286,7 +1290,7 @@ class OptimizedPowerPointAnalyzer:
     METADATA_PATTERNS = {
         'project_name': OptimizedPatterns.PROJECT_NAME,
         'application_name': OptimizedPatterns.APPLICATION_NAME,
-        'release': OptimizedPatterns.RELEASE
+        'release': OptimizedPatterns.ENTERPRISE_RELEASE_ID
     }
     
     def __init__(self, file_path):
@@ -1492,8 +1496,8 @@ class OptimizedDocxComplianceChecker:
                 ('business_app_id', 'application_id', 'Application ID'),  # 8 digits
                 ('clarity_project_id', 'project_id', 'Project ID'),       # PRJ0XXXX
                 ('project_name', 'project_name', 'Project Name'),
-                ('release', 'release', 'Release'),
-                ('enterprise_release_id', 'enterprise_release_id', 'Enterprise Release ID')  # RLSEXXXXXXX
+                ('release', 'release', 'Release'),      #- Format: RLSE0031115
+                ('enterprise_release_id', 'enterprise_release_id', 'Enterprise Release ID')  # 2025.M08
             ]
             
             matches = 0
@@ -1554,7 +1558,7 @@ class OptimizedDocxComplianceChecker:
             return True
         
         # Special validation for ID fields
-        if field_type == 'enterprise_release_id':
+        if field_type == 'release':
             # Should match RLSE + 7 digits pattern
             return re.match(r'^RLSE\d{7}$', doc_value, re.IGNORECASE) and excel_value.upper() == doc_value.upper()
         elif field_type == 'business_app_id':
@@ -1563,6 +1567,8 @@ class OptimizedDocxComplianceChecker:
         elif field_type == 'clarity_project_id':
             # Should match PRJ0 + 4 digits pattern
             return re.match(r'^PRJ0\d{4}$', doc_value, re.IGNORECASE) and excel_value.upper() == doc_value.upper()
+        elif field_type == 'enterprise_release_id':
+            return re.match(r'\b\d{4}\.M\d{2}\b', doc_value, re.IGNORECASE) and excel_value.upper() == doc_value.upper()
         
         return excel_value.lower() == doc_value.lower()
     
@@ -1760,8 +1766,8 @@ class OptimizedDocxComplianceChecker:
             'Application ID (8 digits)': self._safe_get_excel_value('business_app_id'),
             'Project ID (PRJ0XXXX)': self._safe_get_excel_value('clarity_project_id'),
             'Project Name': self._safe_get_excel_value('project_name'),
-            'Release': self._safe_get_excel_value('release'),
-            'Enterprise Release ID (RLSEXXXXXXX)': self._safe_get_excel_value('enterprise_release_id'),
+            'Release (RLSEXXXXXXX)': self._safe_get_excel_value('release'),
+            'Enterprise Release ID (d{4}.Md{2})': self._safe_get_excel_value('enterprise_release_id'),
             'Install Start Date': self._safe_get_excel_value('install_start_date')
         }
     
@@ -1772,8 +1778,8 @@ class OptimizedDocxComplianceChecker:
             'Application ID (8 digits)': first_page_data.get('application_id', 'Not found'),
             'Project ID (PRJ0XXXX)': first_page_data.get('project_id', 'Not found'),
             'Project Name': first_page_data.get('project_name', 'Not found'),
-            'Release': first_page_data.get('release', 'Not found'),
-            'Enterprise Release ID (RLSEXXXXXXX)': first_page_data.get('enterprise_release_id', 'Not found'),
+            'Release (RLSEXXXXXXX)': first_page_data.get('release', 'Not found'),
+            'Enterprise Release ID (d{4}.Md{2})': first_page_data.get('enterprise_release_id', 'Not found'),
             'Implementation Date': first_page_data.get('implementation_date', 'Not found')
         }
     
@@ -1913,8 +1919,8 @@ class OptimizedPptxComplianceChecker:
                 )
             
             # Check Enterprise Release ID (RLSE + 7 digits)
-            excel_enterprise = self.excel_data.get('enterprise_release_id', [None])[0]
-            ppt_enterprise = first_slide_data.get('hyphenated_enterprise_release_id')
+            excel_enterprise = self.excel_data.get('release_id', [None])[0]
+            ppt_enterprise = first_slide_data.get('hyphenated__release_id')
             
             # Check Clarity Project ID (PRJ0 + 4 digits)
             excel_clarity = self.excel_data.get('clarity_project_id', [None])[0]
